@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TuyaMQTT</title>
+<style>
+  :root {
+    --bg:       #0f1117;
+    --surface:  #1a1d27;
+    --surface2: #22263a;
+    --border:   #2e3248;
+    --accent:   #6c63ff;
+    --accent2:  #4ecdc4;
+    --text:     #e8eaf0;
+    --muted:    #6b7094;
+    --green:    #22c55e;
+    --red:      #ef4444;
+    --yellow:   #f59e0b;
+    --radius:   10px;
+    --font:     'Inter', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; min-height: 100vh; }
+
+  /* ── Header ── */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 28px; height: 56px;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .logo { font-size: 16px; font-weight: 700; letter-spacing: .5px; color: var(--text); }
+  .logo span { color: var(--accent); }
+  .badge { font-size: 11px; padding: 3px 9px; border-radius: 20px; font-weight: 600; }
+  .badge-ok  { background: #14532d; color: var(--green); }
+  .badge-err { background: #450a0a; color: var(--red); }
+
+  /* ── Tabs ── */
+  nav { display: flex; gap: 2px; padding: 0 28px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .tab {
+    padding: 12px 20px; cursor: pointer; font-size: 13px; font-weight: 500;
+    color: var(--muted); border-bottom: 2px solid transparent;
+    transition: color .15s, border-color .15s; white-space: nowrap;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  /* ── Content ── */
+  main { padding: 28px; max-width: 1200px; margin: 0 auto; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+  }
+  .card-title { font-size: 12px; font-weight: 600; letter-spacing: .8px; text-transform: uppercase; color: var(--muted); margin-bottom: 14px; }
+
+  /* ── Stat row ── */
+  .stats { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  .stat {
+    flex: 1; min-width: 130px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px 18px;
+  }
+  .stat-val { font-size: 28px; font-weight: 700; line-height: 1; }
+  .stat-label { font-size: 11px; color: var(--muted); margin-top: 5px; }
+
+  /* ── Tables ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 8px 12px; font-size: 11px; font-weight: 600; letter-spacing: .6px; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--surface2); }
+
+  /* ── Status dot ── */
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot-green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot-red   { background: var(--red); }
+  .dot-yellow{ background: var(--yellow); }
+
+  /* ── Toggle ── */
+  .toggle { position: relative; display: inline-block; width: 40px; height: 22px; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0; border-radius: 22px;
+    background: var(--border); cursor: pointer; transition: background .2s;
+  }
+  .slider::before {
+    content: ''; position: absolute; width: 16px; height: 16px;
+    border-radius: 50%; left: 3px; top: 3px;
+    background: var(--muted); transition: transform .2s, background .2s;
+  }
+  input:checked + .slider { background: var(--accent); }
+  input:checked + .slider::before { transform: translateX(18px); background: #fff; }
+  .toggle-disabled { opacity: .4; pointer-events: none; }
+
+  /* ── Buttons ── */
+  .btn {
+    padding: 8px 18px; border-radius: 7px; border: none; cursor: pointer;
+    font-size: 13px; font-weight: 600; transition: opacity .15s;
+  }
+  .btn:hover { opacity: .85; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-sm { padding: 5px 12px; font-size: 12px; }
+  .btn-danger { background: var(--red); color: #fff; }
+  .btn-ghost { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+
+  /* ── Log terminal ── */
+  .terminal {
+    background: #0a0c12; border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px; font-family: 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 12px; line-height: 1.7; height: 400px; overflow-y: auto;
+    color: #a8b2d8; white-space: pre-wrap; word-break: break-all;
+  }
+  .log-info    { color: #a8b2d8; }
+  .log-warning { color: var(--yellow); }
+  .log-error   { color: var(--red); }
+  .log-debug   { color: #4a5180; }
+
+  /* ── Device control cards ── */
+  .device-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+  .device-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px;
+    transition: border-color .2s;
+  }
+  .device-card.online  { border-color: var(--border); }
+  .device-card.offline { border-color: #2d1a1a; opacity: .7; }
+  .device-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+  .device-name { font-weight: 600; font-size: 14px; }
+  .device-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .dps-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .dps-row:last-child { border-bottom: none; }
+  .dps-label { font-size: 12px; color: var(--muted); }
+  .dps-val   { font-size: 12px; font-weight: 500; }
+
+  /* ── Discovery log ── */
+  .disc-log {
+    background: #0a0c12; border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px; font-family: monospace; font-size: 12px; height: 260px;
+    overflow-y: auto; color: var(--accent2); white-space: pre-wrap;
+    margin-top: 14px; display: none;
+  }
+
+  /* ── Settings form ── */
+  .form-row { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+  .form-row label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
+  .form-row input {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 7px; padding: 9px 12px; font-size: 13px; width: 100%;
+    font-family: var(--font);
+  }
+  .form-row input:focus { outline: none; border-color: var(--accent); }
+  .form-group { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+  /* ── Misc ── */
+  .section-title { font-size: 18px; font-weight: 700; margin-bottom: 18px; }
+  .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 40px; }
+  .chip { display: inline-block; padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
+  .chip-switch  { background: #1e293b; color: #60a5fa; }
+  .chip-light   { background: #2d1f0a; color: #fbbf24; }
+  .chip-fan     { background: #0a2d2d; color: var(--accent2); }
+  .chip-sensor  { background: #1a0d2e; color: #a78bfa; }
+  .chip-cover   { background: #1a2010; color: #86efac; }
+  .chip-unknown { background: #1a1a2e; color: var(--muted); }
+
+  @media (max-width: 600px) {
+    nav { overflow-x: auto; }
+    .form-group { grid-template-columns: 1fr; }
+    .stats { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Tuya<span>MQTT</span></div>
+  <span id="hdr-badge" class="badge badge-ok">● Connecting…</span>
+</header>
+
+<nav>
+  <div class="tab active" data-tab="monitoring">Monitoring</div>
+  <div class="tab" data-tab="control">Control</div>
+  <div class="tab" data-tab="discovery">Discovery</div>
+  <div class="tab" data-tab="settings">Settings</div>
+</nav>
+
+<main>
+
+<!-- ═══════════════════════ MONITORING ═══════════════════════ -->
+<div class="panel active" id="tab-monitoring">
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-val" id="m-total">—</div>
+      <div class="stat-label">Total Devices</div>
+    </div>
+    <div class="stat">
+      <div class="stat-val" style="color:var(--green)" id="m-online">—</div>
+      <div class="stat-label">Online</div>
+    </div>
+    <div class="stat">
+      <div class="stat-val" style="color:var(--red)" id="m-offline">—</div>
+      <div class="stat-label">Offline</div>
+    </div>
+    <div class="stat">
+      <div class="stat-val" id="m-uptime">—</div>
+      <div class="stat-label">Uptime</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Device Connections</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Device</th><th>Type</th><th>IP</th><th>Status</th>
+          <th>Last Seen</th><th>Last Cmd</th><th>Fails</th>
+        </tr>
+      </thead>
+      <tbody id="mon-table"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div class="card-title" style="margin:0">Live Log</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="log-scroll" checked> Auto-scroll
+        </label>
+        <button class="btn btn-ghost btn-sm" onclick="clearLog()">Clear</button>
+      </div>
+    </div>
+    <div class="terminal" id="log-terminal"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ CONTROL ═══════════════════════ -->
+<div class="panel" id="tab-control">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+    <div class="section-title">Device Control</div>
+    <span style="font-size:12px;color:var(--muted)">State updates live via push</span>
+  </div>
+  <div class="device-grid" id="ctrl-grid"></div>
+</div>
+
+<!-- ═══════════════════════ DISCOVERY ═══════════════════════ -->
+<div class="panel" id="tab-discovery">
+  <div class="section-title">Device Registry</div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div class="card-title" style="margin:0">Registered Devices</div>
+      <button class="btn btn-primary btn-sm" onclick="runDiscover()" id="disc-btn">Run Discovery</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Type</th><th>IP</th><th>Version</th><th>DPS</th><th>ID</th></tr>
+      </thead>
+      <tbody id="disc-table"></tbody>
+    </table>
+    <div class="disc-log" id="disc-log"></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════ SETTINGS ═══════════════════════ -->
+<div class="panel" id="tab-settings">
+  <div class="section-title">Settings</div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+      <div class="card-title" style="margin:0">Tuya Cloud Credentials</div>
+      <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="show-secrets" onchange="loadEnv()"> Show secrets
+      </label>
+    </div>
+    <div class="form-group">
+      <div class="form-row"><label>Client ID</label><input id="env-TUYA_CLIENT_ID" type="text"></div>
+      <div class="form-row"><label>Secret</label><input id="env-TUYA_SECRET" type="text"></div>
+      <div class="form-row"><label>Region</label><input id="env-TUYA_REGION" type="text" placeholder="eu / us / cn / in"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">MQTT Broker</div>
+    <div class="form-group">
+      <div class="form-row"><label>Host</label><input id="env-MQTT_HOST" type="text"></div>
+      <div class="form-row"><label>Port</label><input id="env-MQTT_PORT" type="text"></div>
+      <div class="form-row"><label>Username</label><input id="env-MQTT_USERNAME" type="text"></div>
+      <div class="form-row"><label>Password</label><input id="env-MQTT_PASSWORD" type="text"></div>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:10px;margin-top:4px">
+    <button class="btn btn-primary" onclick="saveEnv()">Save Changes</button>
+    <span id="save-msg" style="font-size:13px;color:var(--green);align-self:center;opacity:0;transition:opacity .3s"></span>
+  </div>
+</div>
+
+</main>
+
+<script>
+// ── Tab routing ───────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'discovery') loadRegistry();
+    if (tab.dataset.tab === 'settings')  loadEnv();
+  });
+});
+
+// ── State ─────────────────────────────────────────────────────────────────────
+const deviceStates = {};   // id → {name, connected, state}
+let statusData = {};
+
+// ── SSE ──────────────────────────────────────────────────────────────────────
+function connectSSE() {
+  const es = new EventSource('/events');
+  es.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'log')   appendLog(msg.line);
+    if (msg.type === 'state') { deviceStates[msg.id] = msg; updateControlCard(msg); }
+  };
+  es.onerror = () => {
+    setBadge(false);
+    setTimeout(connectSSE, 3000);
+  };
+  es.onopen = () => setBadge(true);
+}
+
+function setBadge(ok) {
+  const b = document.getElementById('hdr-badge');
+  b.textContent = ok ? '● Connected' : '● Disconnected';
+  b.className = 'badge ' + (ok ? 'badge-ok' : 'badge-err');
+}
+
+// ── Monitoring ────────────────────────────────────────────────────────────────
+function fmtSec(s) {
+  if (s === null || s === undefined) return '—';
+  if (s < 60)  return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  return Math.floor(s/3600) + 'h ago';
+}
+
+function fmtUptime(s) {
+  if (s < 60)   return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm';
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+  return h + 'h ' + m + 'm';
+}
+
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/status');
+    statusData = await r.json();
+    document.getElementById('m-total').textContent   = statusData.devices_total;
+    document.getElementById('m-online').textContent  = statusData.devices_online;
+    document.getElementById('m-offline').textContent = statusData.devices_offline;
+    document.getElementById('m-uptime').textContent  = fmtUptime(statusData.uptime_s);
+
+    const tbody = document.getElementById('mon-table');
+    tbody.innerHTML = '';
+    for (const d of statusData.devices) {
+      const tr = document.createElement('tr');
+      const dot = d.connected ? '<span class="dot dot-green"></span>' : '<span class="dot dot-red"></span>';
+      const status = d.connected ? 'Online' : (d.fail_count > 0 ? `Offline (×${d.fail_count})` : 'Offline');
+      tr.innerHTML = `
+        <td><strong>${d.name}</strong></td>
+        <td><span class="chip chip-${d.type}">${d.type}</span></td>
+        <td style="font-family:monospace;color:var(--muted)">${d.ip || '—'}</td>
+        <td>${dot}${status}</td>
+        <td>${fmtSec(d.last_seen)}</td>
+        <td>${fmtSec(d.last_cmd)}</td>
+        <td style="color:${d.fail_count>0?'var(--yellow)':'var(--muted)'}">${d.fail_count}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+
+    // also refresh control grid layout if devices changed
+    rebuildControlGrid(statusData.devices);
+  } catch(e) { setBadge(false); }
+}
+
+setInterval(refreshStatus, 5000);
+refreshStatus();
+
+// ── Logs ─────────────────────────────────────────────────────────────────────
+async function loadInitialLogs() {
+  const r = await fetch('/api/logs?n=200');
+  const d = await r.json();
+  d.lines.forEach(appendLog);
+}
+
+function appendLog(line) {
+  const el = document.getElementById('log-terminal');
+  const div = document.createElement('div');
+  div.className = line.includes('WARNING') ? 'log-warning'
+                : line.includes('ERROR')   ? 'log-error'
+                : line.includes('DEBUG')   ? 'log-debug'
+                : 'log-info';
+  div.textContent = line;
+  el.appendChild(div);
+  if (document.getElementById('log-scroll').checked) {
+    el.scrollTop = el.scrollHeight;
+  }
+  // keep DOM lean
+  while (el.children.length > 500) el.removeChild(el.firstChild);
+}
+
+function clearLog() {
+  document.getElementById('log-terminal').innerHTML = '';
+}
+
+// ── Control ───────────────────────────────────────────────────────────────────
+let _controlBuilt = false;
+
+function chipClass(type) {
+  return 'chip-' + (type || 'unknown');
+}
+
+function rebuildControlGrid(devices) {
+  if (_controlBuilt) return;
+  _controlBuilt = true;
+  const grid = document.getElementById('ctrl-grid');
+  grid.innerHTML = '';
+  for (const d of devices) {
+    const card = document.createElement('div');
+    card.className = 'device-card ' + (d.connected ? 'online' : 'offline');
+    card.id = 'ctrl-' + d.id;
+
+    const dpsMap = d.state || {};
+    const dpsRows = Object.entries(dpsMap).map(([k, v]) => buildDpsRow(d.id, d, k, v)).join('');
+
+    card.innerHTML = `
+      <div class="device-card-header">
+        <div>
+          <div class="device-name">${d.name}</div>
+          <div class="device-meta">
+            <span class="dot ${d.connected ? 'dot-green' : 'dot-red'}"></span>
+            ${d.ip || ''}  <span class="chip ${chipClass(d.type)}">${d.type}</span>
+          </div>
+        </div>
+      </div>
+      <div class="dps-rows" id="dps-${d.id}">${dpsRows}</div>
+    `;
+    grid.appendChild(card);
+  }
+}
+
+function buildDpsRow(devId, dev, dpsCode, value) {
+  const isBool = typeof value === 'boolean';
+  const isNum  = typeof value === 'number';
+  const id     = `toggle-${devId}-${dpsCode}`;
+  let control  = '';
+
+  if (isBool) {
+    control = `
+      <label class="toggle">
+        <input type="checkbox" id="${id}" ${value ? 'checked' : ''}
+          onchange="sendCmd('${devId}','${dpsCode}',this.checked?'ON':'OFF')">
+        <span class="slider"></span>
+      </label>`;
+  } else {
+    control = `<span class="dps-val">${value}</span>`;
+  }
+  return `<div class="dps-row">
+    <span class="dps-label">DPS ${dpsCode}</span>
+    ${control}
+  </div>`;
+}
+
+function updateControlCard(msg) {
+  const card = document.getElementById('ctrl-' + msg.id);
+  if (!card) return;
+  card.className = 'device-card ' + (msg.connected ? 'online' : 'offline');
+
+  const container = document.getElementById('dps-' + msg.id);
+  if (!container) return;
+
+  for (const [k, v] of Object.entries(msg.state || {})) {
+    const id = `toggle-${msg.id}-${k}`;
+    const el = document.getElementById(id);
+    if (el && typeof v === 'boolean') el.checked = v;
+
+    // update numeric display
+    const rows = container.querySelectorAll('.dps-row');
+    rows.forEach(row => {
+      const label = row.querySelector('.dps-label');
+      if (label && label.textContent.trim() === `DPS ${k}` && typeof v === 'number') {
+        const val = row.querySelector('.dps-val');
+        if (val) val.textContent = v;
+      }
+    });
+  }
+}
+
+async function sendCmd(devId, dpsCode, value) {
+  await fetch('/api/command', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({dev_id: devId, dps_code: dpsCode, value}),
+  });
+}
+
+// ── Discovery ─────────────────────────────────────────────────────────────────
+async function loadRegistry() {
+  const r = await fetch('/api/registry');
+  const d = await r.json();
+  const tbody = document.getElementById('disc-table');
+  tbody.innerHTML = '';
+  for (const dev of (d.devices || [])) {
+    const dpsCount = Object.keys(dev.dps_map || {}).length;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${dev.name || dev.friendly_name || '—'}</strong></td>
+      <td><span class="chip chip-${dev.type || 'unknown'}">${dev.type || 'unknown'}</span></td>
+      <td style="font-family:monospace;color:var(--muted)">${dev.ip || '—'}</td>
+      <td style="font-family:monospace">${dev.version || '—'}</td>
+      <td>${dpsCount}</td>
+      <td style="font-family:monospace;color:var(--muted);font-size:11px">${(dev.id || '').substring(0,16)}…</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+async function runDiscover() {
+  const btn = document.getElementById('disc-btn');
+  const log = document.getElementById('disc-log');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  log.style.display = 'block';
+  log.textContent = '';
+
+  const es = new EventSource('/api/discover');
+  es.onmessage = e => {
+    const d = JSON.parse(e.data);
+    if (d.done) {
+      es.close();
+      btn.disabled = false;
+      btn.textContent = 'Run Discovery';
+      loadRegistry();
+      return;
+    }
+    log.textContent += (d.line || '') + '\n';
+    log.scrollTop = log.scrollHeight;
+  };
+  es.onerror = () => {
+    es.close();
+    btn.disabled = false;
+    btn.textContent = 'Run Discovery';
+  };
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+async function loadEnv() {
+  const show = document.getElementById('show-secrets').checked ? '1' : '0';
+  const r = await fetch('/api/env?show=' + show);
+  const d = await r.json();
+  for (const [k, v] of Object.entries(d)) {
+    const el = document.getElementById('env-' + k);
+    if (el) el.value = v;
+  }
+}
+
+async function saveEnv() {
+  const keys = ['TUYA_CLIENT_ID','TUYA_SECRET','TUYA_REGION',
+                 'MQTT_HOST','MQTT_PORT','MQTT_USERNAME','MQTT_PASSWORD'];
+  const body = {};
+  for (const k of keys) {
+    const el = document.getElementById('env-' + k);
+    if (el) body[k] = el.value;
+  }
+  await fetch('/api/env', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const msg = document.getElementById('save-msg');
+  msg.textContent = 'Saved!';
+  msg.style.opacity = '1';
+  setTimeout(() => msg.style.opacity = '0', 2000);
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+connectSSE();
+loadInitialLogs();
+</script>
+</body>
+</html>

@@ -40,9 +40,10 @@ RECONNECT_BASE   = 10      # initial reconnect delay in seconds
 RECONNECT_MAX    = 300     # cap at 5 minutes
 VERSIONS         = [3.3, 3.4, 3.5, 3.1]
 
-# Shared health state — written by workers, read by health server in run.py
+# Shared state — written by workers/main, read by health + web servers
 _workers: dict[str, "DeviceWorker"] = {}
 _state_cache: dict[str, dict] = {}
+_start_time: float = 0.0
 
 
 def _make_socket_pair() -> tuple[socket.socket, socket.socket]:
@@ -503,7 +504,8 @@ def load_registry() -> tuple[list[dict], float]:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
-    global _workers, _state_cache
+    global _workers, _state_cache, _start_time
+    _start_time = time.time()
 
     if not REGISTRY_FILE.exists():
         log.error("devices_registry.json not found. Run: uv run python discover.py")

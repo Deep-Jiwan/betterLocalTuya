@@ -160,8 +160,14 @@ async def main():
     from bridge import main as bridge_main
     bridge_task = asyncio.ensure_future(bridge_main())
 
-    # Stage 3: health server
+    # Stage 3: health server (lightweight JSON endpoint)
     health_server = await start_health_server()
+
+    # Stage 4: web UI
+    log.info("=== Stage 3: Starting web UI ===")
+    from web import build_app, start_web, install_log_handler
+    install_log_handler()
+    web_runner = await start_web(build_app())
 
     log.info("=== Stack running - Ctrl+C to stop ===")
 
@@ -181,6 +187,7 @@ async def main():
 
     health_server.close()
     await health_server.wait_closed()
+    await web_runner.cleanup()
     await mqtt_broker.shutdown()
     log.info("All services stopped.")
 
