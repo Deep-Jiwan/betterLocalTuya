@@ -5,8 +5,8 @@ publishes Home Assistant MQTT Discovery configs.
 Architecture:
   - One background thread per device (tinytuya blocking I/O)
   - Threads push state updates into an asyncio queue
-  - Main asyncio loop reads queue → publishes to MQTT state topics
-  - HA commands arrive via MQTT → forwarded to device threads
+  - Main asyncio loop reads queue -> publishes to MQTT state topics
+  - HA commands arrive via MQTT -> forwarded to device threads
 
 Run:
   uv run python bridge.py
@@ -31,12 +31,18 @@ load_dotenv()
 
 log = logging.getLogger("bridge")
 
-REGISTRY_FILE   = Path("devices_registry.json")
-HA_DISCOVERY    = "homeassistant"
-HEARTBEAT_SECS  = 15
-RECONNECT_SECS  = 10
-MIN_CMD_INTERVAL = 0.15   # minimum seconds between sends to the same device
-VERSIONS        = [3.3, 3.4, 3.5, 3.1]
+REGISTRY_FILE    = Path("devices_registry.json")
+HA_DISCOVERY     = "homeassistant"
+HEARTBEAT_SECS   = 15
+MIN_CMD_INTERVAL = 0.15    # minimum seconds between sends to the same device
+STATE_POLL_SECS  = 300     # reconcile local device state every 5 minutes (LAN only)
+RECONNECT_BASE   = 10      # initial reconnect delay in seconds
+RECONNECT_MAX    = 300     # cap at 5 minutes
+VERSIONS         = [3.3, 3.4, 3.5, 3.1]
+
+# Shared health state — written by workers, read by health server in run.py
+_workers: dict[str, "DeviceWorker"] = {}
+_state_cache: dict[str, dict] = {}
 
 
 def _make_socket_pair() -> tuple[socket.socket, socket.socket]:
@@ -59,7 +65,6 @@ def _apply_keepalive(sock: socket.socket, idle: int = 60, interval: int = 10, co
     """Enable TCP keepalive to prevent router conntrack from silently dropping idle connections."""
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        # These constants exist on Linux and Windows 10+; skip gracefully if absent.
         if hasattr(socket, "TCP_KEEPIDLE"):
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, idle)
         if hasattr(socket, "TCP_KEEPINTVL"):
@@ -67,7 +72,7 @@ def _apply_keepalive(sock: socket.socket, idle: int = 60, interval: int = 10, co
         if hasattr(socket, "TCP_KEEPCNT"):
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, count)
     except Exception:
-        pass  # keepalive is best-effort; don't break the connection if it fails
+        pass
 
 
 # ── MQTT topic helpers ────────────────────────────────────────────────────────
@@ -82,8 +87,8 @@ def cmd_topic(dev_id: str, dps: str) -> str: return f"tuya/command/{dev_id}/{dps
 class DeviceWorker(threading.Thread):
     """
     One thread per device. Uses select() on the device socket and a wakeup
-    socketpair so commands are delivered the instant they arrive — no polling,
-    no timeout expiry. Single TCP connection throughout.
+    socketpair so commands are delivered the instant they arrive.
+    Exponential backoff on repeated failures; local state poll every 5 min.
     """
 
     def __init__(self, dev: dict, state_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
@@ -91,11 +96,17 @@ class DeviceWorker(threading.Thread):
         self.dev         = dev
         self.state_queue = state_queue
         self.loop        = loop
-        self._pending: dict[str, object] = {}   # dps_code → latest value (coalesced)
+        self._pending: dict[str, object] = {}
         self._lock       = threading.Lock()
         self._last_send  = 0.0
         self._stop_evt   = threading.Event()
         self._wake_r, self._wake_w = _make_socket_pair()
+
+        # health fields (read externally)
+        self.connected      = False
+        self.last_seen: float | None = None
+        self.last_cmd: float | None  = None
+        self.fail_count     = 0
 
     def stop(self):
         self._stop_evt.set()
@@ -108,8 +119,9 @@ class DeviceWorker(threading.Thread):
         """Called from asyncio thread. Coalesces: only the latest value per DPS is kept."""
         with self._lock:
             self._pending[dps_code] = value
+        self.last_cmd = time.time()
         try:
-            self._wake_w.send(b"\x01")  # any byte wakes select()
+            self._wake_w.send(b"\x01")
         except Exception:
             pass
 
@@ -143,7 +155,6 @@ class DeviceWorker(threading.Thread):
                     self.dev["version"] = v
                     _apply_keepalive(d.socket)
                     return d
-                # bad response — close before trying next version
                 d.close()
             except Exception:
                 if d is not None:
@@ -152,6 +163,10 @@ class DeviceWorker(threading.Thread):
                     except Exception:
                         pass
         return None
+
+    def _backoff(self) -> float:
+        """Exponential backoff capped at RECONNECT_MAX."""
+        return min(RECONNECT_BASE * (2 ** self.fail_count), RECONNECT_MAX)
 
     def run(self):
         name = self.dev["name"]
@@ -162,11 +177,18 @@ class DeviceWorker(threading.Thread):
                 d = self._connect()
 
                 if d is None:
-                    log.warning("[%s] Unreachable - retry in %ss", name, RECONNECT_SECS)
+                    self.connected  = False
+                    self.fail_count += 1
+                    delay = self._backoff()
+                    log.warning("[%s] Unreachable - retry in %gs (attempt %d)",
+                                name, delay, self.fail_count)
                     self._push_state({}, available=False)
-                    self._stop_evt.wait(RECONNECT_SECS)
+                    self._stop_evt.wait(delay)
                     continue
 
+                self.connected  = True
+                self.fail_count = 0
+                self.last_seen  = time.time()
                 log.info("[%s] Connected (v%s)", name, self.dev.get("version"))
 
                 # push initial state
@@ -174,6 +196,7 @@ class DeviceWorker(threading.Thread):
                     s = d.status()
                     if s and "dps" in s:
                         self._push_state(s["dps"], available=True)
+                        self.last_seen = time.time()
                 except Exception:
                     pass
 
@@ -182,33 +205,34 @@ class DeviceWorker(threading.Thread):
                 try:
                     sel.register(d.socket, selectors.EVENT_READ, "device")
                     sel.register(self._wake_r, selectors.EVENT_READ, "wake")
-                    last_hb = time.monotonic()
+                    last_hb   = time.monotonic()
+                    last_poll = time.monotonic()
 
                     while not self._stop_evt.is_set():
-                        now = time.monotonic()
+                        now     = time.monotonic()
                         hb_in   = max(0.0, HEARTBEAT_SECS - (now - last_hb))
+                        poll_in = max(0.0, STATE_POLL_SECS - (now - last_poll))
                         cool_in = max(0.0, MIN_CMD_INTERVAL - (now - self._last_send))
                         with self._lock:
                             has_pending = bool(self._pending)
-                        # wake early if pending commands are waiting out a cooldown
-                        timeout = max(0.05, min(hb_in, cool_in if has_pending else hb_in))
+                        timeout = max(0.05, min(hb_in, poll_in,
+                                                cool_in if has_pending else hb_in))
                         ready = sel.select(timeout=timeout)
 
                         for key, _ in ready:
                             if key.data == "wake":
-                                # drain fully so bytes don't accumulate
                                 try:
                                     self._wake_r.recv(4096)
                                 except Exception:
                                     pass
 
                             elif key.data == "device":
-                                # ── inbound: device sent something ───────
                                 data = d.receive()
                                 if data is None:
                                     continue
                                 if "dps" in data:
                                     self._push_state(data["dps"], available=True)
+                                    self.last_seen = time.time()
                                     log.debug("[%s] State: %s", name, data["dps"])
                                 elif data.get("Err"):
                                     raise ConnectionError(f"device error: {data}")
@@ -233,9 +257,24 @@ class DeviceWorker(threading.Thread):
                             last_hb = time.monotonic()
                             log.debug("[%s] Heartbeat", name)
 
+                        # ── state poll (local LAN only, no cloud) ─────────
+                        if time.monotonic() - last_poll >= STATE_POLL_SECS:
+                            try:
+                                s = d.status()
+                                if s and "dps" in s:
+                                    self._push_state(s["dps"], available=True)
+                                    self.last_seen = time.time()
+                                    log.debug("[%s] Poll reconcile: %s", name, s["dps"])
+                            except Exception as e:
+                                log.warning("[%s] Poll failed: %s", name, e)
+                            last_poll = time.monotonic()
+
                 except Exception as e:
-                    log.warning("[%s] Connection lost: %s - reconnecting in %ss",
-                                name, e, RECONNECT_SECS)
+                    self.connected  = False
+                    self.fail_count += 1
+                    delay = self._backoff()
+                    log.warning("[%s] Connection lost: %s - reconnecting in %gs",
+                                name, e, delay)
                 finally:
                     sel.close()
 
@@ -244,9 +283,13 @@ class DeviceWorker(threading.Thread):
                     d.close()
                 except Exception:
                     pass
-                self._stop_evt.wait(RECONNECT_SECS)
+
+                if not self._stop_evt.is_set():
+                    delay = self._backoff()
+                    self._stop_evt.wait(delay)
 
         finally:
+            self.connected = False
             try:
                 self._wake_r.close()
                 self._wake_w.close()
@@ -401,7 +444,9 @@ def entities_for_device(dev: dict) -> list[dict]:
             })
 
     elif dev_type == "sensor":
-        for dps_code, info in sorted(((k, v) for k, v in dps_map.items() if k.isdigit()), key=lambda x: int(x[0])):
+        for dps_code, info in sorted(
+            ((k, v) for k, v in dps_map.items() if k.isdigit()), key=lambda x: int(x[0])
+        ):
             uid = f"{dev_id}_s{dps_code}"
             entities.append({
                 "ha_type":         "sensor",
@@ -435,9 +480,9 @@ def parse_command(raw: str, dps_code: str, dev: dict):
     try:
         if dps_type == "int":
             val = int(raw)
-            if dps_code == "22":  # brightness: HA 0-255 → Tuya 10-1000
+            if dps_code == "22":
                 return max(10, int(val / 255 * 990) + 10)
-            if dps_code == "23":  # color temp: mireds → 0-1000
+            if dps_code == "23":
                 return max(0, int((val - 153) / 347 * 1000))
             return val
         if dps_type == "float":
@@ -458,6 +503,8 @@ def load_registry() -> tuple[list[dict], float]:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
+    global _workers, _state_cache
+
     if not REGISTRY_FILE.exists():
         log.error("devices_registry.json not found. Run: uv run python discover.py")
         sys.exit(1)
@@ -473,21 +520,20 @@ async def main():
     devices, registry_mtime = load_registry()
     reachable = [d for d in devices if d.get("ip") and d.get("key") and d.get("type") != "ir"]
 
-    # start device workers
     workers: dict[str, DeviceWorker] = {}
     for dev in reachable:
         w = DeviceWorker(dev, state_queue, loop)
         w.start()
         workers[dev["id"]] = w
+    _workers = workers
 
     log.info("Started %d device worker(s)", len(workers))
 
-    # build entity + command map
     all_entities = []
     for dev in devices:
         all_entities.extend(entities_for_device(dev))
 
-    cmd_map: dict[str, tuple[str, str]] = {}  # topic → (dev_id, dps_code)
+    cmd_map: dict[str, tuple[str, str]] = {}
     for ent in all_entities:
         cfg = ent["config"]
         dev_id = next((d["id"] for d in devices if ent["unique_id"].startswith(d["id"])), None)
@@ -512,69 +558,66 @@ async def main():
     ) as client:
         log.info("Connected to MQTT broker")
 
-        # publish HA discovery (retained)
         for ent in all_entities:
             await client.publish(ent["discovery_topic"], json.dumps(ent["config"]), retain=True)
         log.info("Published %d HA discovery config(s)", len(all_entities))
 
-        # mark all devices offline until we hear from them
         for dev in reachable:
             await client.publish(avail_topic(dev["id"]), "offline", retain=True)
 
-        # subscribe to HA command topics
         for topic in cmd_map:
             await client.subscribe(topic)
-        log.info("Ready — %d entity(ies), %d command topic(s)", len(all_entities), len(cmd_map))
+        log.info("Ready - %d entity(ies), %d command topic(s)", len(all_entities), len(cmd_map))
 
-        # per-device merged state cache so partial DPS updates don't clobber other keys
         state_cache: dict[str, dict] = {}
+        _state_cache = state_cache
 
         async def publish_states():
-            """Read device state updates and publish to MQTT."""
             while True:
-                update = await state_queue.get()
+                update    = await state_queue.get()
                 dev_id    = update["id"]
                 dps       = update["dps"]
                 available = update["available"]
 
-                status = "online" if available else "offline"
-                await client.publish(avail_topic(dev_id), status, retain=True)
-
+                await client.publish(avail_topic(dev_id),
+                                     "online" if available else "offline", retain=True)
                 if dps:
-                    # merge partial update into cached full state
                     cached = state_cache.setdefault(dev_id, {})
                     cached.update(dps)
                     await client.publish(state_topic(dev_id), json.dumps(cached), retain=True)
                     log.debug("State %s: %s", dev_id, cached)
 
         async def handle_commands():
-            """Receive HA commands and forward to device workers."""
             async for msg in client.messages:
                 topic   = str(msg.topic)
                 payload = msg.payload.decode(errors="replace")
 
-                # hot-reload registry if changed
                 nonlocal registry_mtime, devices, all_entities, cmd_map, dev_by_id
                 current_mtime = REGISTRY_FILE.stat().st_mtime
                 if current_mtime != registry_mtime:
-                    log.info("Registry changed — reloading...")
+                    log.info("Registry changed - reloading...")
                     devices, registry_mtime = load_registry()
                     dev_by_id = {d["id"]: d for d in devices}
                     all_entities = []
                     for dev in devices:
                         all_entities.extend(entities_for_device(dev))
                     for ent in all_entities:
-                        await client.publish(ent["discovery_topic"], json.dumps(ent["config"]), retain=True)
+                        await client.publish(ent["discovery_topic"],
+                                             json.dumps(ent["config"]), retain=True)
                     new_cmds = {}
                     for ent in all_entities:
                         cfg = ent["config"]
-                        dev_id = next((d["id"] for d in devices if ent["unique_id"].startswith(d["id"])), None)
+                        dev_id = next(
+                            (d["id"] for d in devices if ent["unique_id"].startswith(d["id"])), None
+                        )
                         if not dev_id:
                             continue
                         for key in ("command_topic", "percentage_command_topic",
                                     "brightness_command_topic", "color_temp_command_topic"):
                             if key in cfg:
-                                dps = "22" if "brightness" in key else "23" if "color_temp" in key else ent["dps_code"]
+                                dps = ("22" if "brightness" in key
+                                       else "23" if "color_temp" in key
+                                       else ent["dps_code"])
                                 new_cmds[cfg[key]] = (dev_id, dps)
                     for t in new_cmds:
                         if t not in cmd_map:
@@ -591,7 +634,20 @@ async def main():
                         worker.send_command(dps_code, value)
                         log.info("Command %s DPS%s = %s", dev.get("name"), dps_code, value)
 
-        await asyncio.gather(publish_states(), handle_commands())
+        async def graceful_offline():
+            """Publish offline for all devices before exit."""
+            for dev in reachable:
+                try:
+                    await client.publish(avail_topic(dev["id"]), "offline", retain=True)
+                except Exception:
+                    pass
+
+        try:
+            await asyncio.gather(publish_states(), handle_commands())
+        finally:
+            await graceful_offline()
+            for w in workers.values():
+                w.stop()
 
 
 if __name__ == "__main__":
