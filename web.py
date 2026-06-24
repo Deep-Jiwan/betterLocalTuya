@@ -30,8 +30,8 @@ import bridge as b
 
 log = logging.getLogger("web")
 
-REGISTRY_FILE = Path("devices_registry.json")
-ENV_FILE      = Path(".env")
+REGISTRY_FILE = Path(os.getenv("DATA_DIR", "data")) / "devices_registry.json"
+ENV_FILE      = Path(os.getenv("DATA_DIR", "data")) / ".env"
 WEB_PORT      = int(os.getenv("WEB_PORT", "47090"))
 LOG_BUFFER    = 500   # lines kept in memory for the UI
 

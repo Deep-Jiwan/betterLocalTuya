@@ -31,7 +31,7 @@ load_dotenv()
 
 log = logging.getLogger("bridge")
 
-REGISTRY_FILE    = Path("devices_registry.json")
+REGISTRY_FILE    = Path(os.getenv("DATA_DIR", "data")) / "devices_registry.json"
 HA_DISCOVERY     = "homeassistant"
 HEARTBEAT_SECS   = 15
 MIN_CMD_INTERVAL = 0.15    # minimum seconds between sends to the same device
@@ -496,6 +496,11 @@ def parse_command(raw: str, dps_code: str, dev: dict):
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 def load_registry() -> tuple[list[dict], float]:
+    if REGISTRY_FILE.is_dir():
+        raise RuntimeError(
+            "devices_registry.json is a directory — Docker created it because the host "
+            "file did not exist when the volume was mounted. Remove it and let discovery create it."
+        )
     with open(REGISTRY_FILE) as f:
         data = json.load(f)
     return data.get("devices", []), REGISTRY_FILE.stat().st_mtime

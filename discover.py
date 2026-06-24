@@ -21,8 +21,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DEVICES_JSON  = Path("devices.json")
-REGISTRY_FILE = Path("devices_registry.json")
+_DATA_DIR     = Path(os.getenv("DATA_DIR", "data"))
+_DATA_DIR.mkdir(exist_ok=True)
+DEVICES_JSON  = _DATA_DIR / "devices.json"
+REGISTRY_FILE = _DATA_DIR / "devices_registry.json"
 PROBE_TIMEOUT = 5
 
 REGION_MAP = {"eu": "eu", "us": "us", "cn": "cn", "in": "in", "ue": "eu"}

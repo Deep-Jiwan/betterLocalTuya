@@ -29,7 +29,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-LOGS_DIR    = Path("logs")
+DATA_DIR    = Path(os.getenv("DATA_DIR", "data"))
+DATA_DIR.mkdir(exist_ok=True)
+LOGS_DIR    = DATA_DIR / "logs"
 HEALTH_PORT = int(os.getenv("HEALTH_PORT", "47765"))
 
 
@@ -66,7 +68,7 @@ def setup_logging():
 setup_logging()
 log = logging.getLogger("run")
 
-REGISTRY_FILE = Path("devices_registry.json")
+REGISTRY_FILE = DATA_DIR / "devices_registry.json"
 _start_time   = time.time()
 
 
@@ -140,10 +142,39 @@ def _install_signal_handlers(shutdown_event: asyncio.Event):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-async def main():
-    if not REGISTRY_FILE.exists():
-        log.error("devices_registry.json not found. Run: uv run python discover.py")
+async def _run_discovery():
+    """Run discover.py as a subprocess and stream its output to the log."""
+    log.info("No device registry found — running discovery automatically...")
+    import subprocess
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "discover.py",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    async for line in proc.stdout:
+        log.info("[discover] %s", line.decode(errors="replace").rstrip())
+    await proc.wait()
+    if proc.returncode != 0:
+        log.error("Discovery failed (exit %d). Set TUYA_CLIENT_ID / TUYA_SECRET and restart.", proc.returncode)
         sys.exit(1)
+    log.info("Discovery complete.")
+
+
+def _registry_is_valid() -> bool:
+    """Return True only if the registry path is a readable non-empty file."""
+    if not REGISTRY_FILE.exists() or REGISTRY_FILE.is_dir():
+        return False
+    try:
+        import json
+        data = json.loads(REGISTRY_FILE.read_text())
+        return bool(data.get("devices"))
+    except Exception:
+        return False
+
+
+async def main():
+    if not _registry_is_valid():
+        await _run_discovery()
 
     shutdown_event = asyncio.Event()
     _install_signal_handlers(shutdown_event)

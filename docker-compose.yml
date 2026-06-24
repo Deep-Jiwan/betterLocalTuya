@@ -22,10 +22,7 @@ services:
       WEB_PORT: "47090"
       HEALTH_PORT: "47765"
     volumes:
-      # Persist discovery registry and settings changes
-      - ./data/devices_registry.json:/app/devices_registry.json
-      - ./data/.env:/app/.env
-      - ./data/logs:/app/logs
+      - ./data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:47765/health"]
       interval: 30s
