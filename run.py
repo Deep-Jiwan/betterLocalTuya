@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 LOGS_DIR    = Path("logs")
-HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8765"))
+HEALTH_PORT = int(os.getenv("HEALTH_PORT", "47765"))
 
 
 def setup_logging():

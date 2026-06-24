@@ -21,7 +21,7 @@ log = logging.getLogger("broker")
 
 def build_config() -> dict:
     host     = os.getenv("MQTT_HOST",     "localhost")
-    port     = int(os.getenv("MQTT_PORT", "1883"))
+    port     = int(os.getenv("MQTT_PORT", "47883"))
     username = os.getenv("MQTT_USERNAME", "").strip()
     password = os.getenv("MQTT_PASSWORD", "").strip()
 
@@ -54,7 +54,7 @@ def build_config() -> dict:
 async def start_broker() -> Broker:
     config = build_config()
     host = os.getenv("MQTT_HOST", "localhost")
-    port = int(os.getenv("MQTT_PORT", "1883"))
+    port = int(os.getenv("MQTT_PORT", "47883"))
 
     broker = Broker(config)
     await broker.start()

@@ -1,0 +1,13 @@
+.git
+.venv
+__pycache__
+*.pyc
+*.pyo
+.env
+devices_registry.json
+devices.json
+logs/
+*.log
+.claude/
+tuya2mqtt.conf
+mqtt_passwd

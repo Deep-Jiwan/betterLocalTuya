@@ -32,7 +32,7 @@ log = logging.getLogger("web")
 
 REGISTRY_FILE = Path("devices_registry.json")
 ENV_FILE      = Path(".env")
-WEB_PORT      = int(os.getenv("WEB_PORT", "8090"))
+WEB_PORT      = int(os.getenv("WEB_PORT", "47090"))
 LOG_BUFFER    = 500   # lines kept in memory for the UI
 
 # ── In-memory log capture ─────────────────────────────────────────────────────

@@ -1,0 +1,34 @@
+services:
+  tuyamqtt:
+    build: .
+    image: tuyamqtt:latest
+    container_name: tuyamqtt
+    restart: unless-stopped
+    ports:
+      - "47883:47883"   # MQTT broker
+      - "47090:47090"   # Web UI
+      - "47765:47765"   # Health
+    environment:
+      # ── Tuya Cloud ────────────────────────────────────────────────
+      TUYA_CLIENT_ID: your_client_id_here
+      TUYA_SECRET: your_secret_here
+      TUYA_REGION: eu
+      # ── Embedded MQTT broker ──────────────────────────────────────
+      MQTT_HOST: localhost
+      MQTT_PORT: "47883"
+      MQTT_USERNAME: ""
+      MQTT_PASSWORD: ""
+      # ── Web UI + health ───────────────────────────────────────────
+      WEB_PORT: "47090"
+      HEALTH_PORT: "47765"
+    volumes:
+      # Persist discovery registry and settings changes
+      - ./data/devices_registry.json:/app/devices_registry.json
+      - ./data/.env:/app/.env
+      - ./data/logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:47765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
