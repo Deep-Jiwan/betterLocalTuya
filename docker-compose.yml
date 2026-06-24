@@ -12,7 +12,7 @@ services:
       # ── Tuya Cloud ────────────────────────────────────────────────
       TUYA_CLIENT_ID: your_client_id_here
       TUYA_SECRET: your_secret_here
-      TUYA_REGION: eu
+      TUYA_REGION: eu          # eu | us | us-e | cn | in
       # ── Embedded MQTT broker ──────────────────────────────────────
       MQTT_HOST: localhost
       MQTT_PORT: "47883"
