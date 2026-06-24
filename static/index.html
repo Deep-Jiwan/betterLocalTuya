@@ -148,12 +148,13 @@
   /* ── Settings form ── */
   .form-row { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
   .form-row label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
-  .form-row input {
+  .form-row input, .form-row select {
     background: var(--surface2); border: 1px solid var(--border); color: var(--text);
     border-radius: 7px; padding: 9px 12px; font-size: 13px; width: 100%;
-    font-family: var(--font);
+    font-family: var(--font); appearance: none;
   }
-  .form-row input:focus { outline: none; border-color: var(--accent); }
+  .form-row select { cursor: pointer; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7094' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; }
+  .form-row input:focus, .form-row select:focus { outline: none; border-color: var(--accent); }
   .form-group { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 
   /* ── Misc ── */
@@ -280,7 +281,16 @@
     <div class="form-group">
       <div class="form-row"><label>Client ID</label><input id="env-TUYA_CLIENT_ID" type="text"></div>
       <div class="form-row"><label>Secret</label><input id="env-TUYA_SECRET" type="text"></div>
-      <div class="form-row"><label>Region</label><input id="env-TUYA_REGION" type="text" placeholder="eu / us / cn / in"></div>
+      <div class="form-row">
+        <label>Region</label>
+        <select id="env-TUYA_REGION">
+          <option value="eu">eu — Europe (Frankfurt)</option>
+          <option value="us">us — Western America</option>
+          <option value="us-e">us-e — Eastern America (Virginia)</option>
+          <option value="cn">cn — China</option>
+          <option value="in">in — India</option>
+        </select>
+      </div>
     </div>
   </div>
 
@@ -564,7 +574,14 @@ async function loadEnv() {
   const d = await r.json();
   for (const [k, v] of Object.entries(d)) {
     const el = document.getElementById('env-' + k);
-    if (el) el.value = v;
+    if (!el) continue;
+    if (el.tagName === 'SELECT') {
+      // select matching option, fallback to first
+      const opt = [...el.options].find(o => o.value === v);
+      if (opt) el.value = v;
+    } else {
+      el.value = v;
+    }
   }
 }
 
@@ -576,15 +593,22 @@ async function saveEnv() {
     const el = document.getElementById('env-' + k);
     if (el) body[k] = el.value;
   }
-  await fetch('/api/env', {
+  const r = await fetch('/api/env', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body),
   });
+  const d = await r.json();
   const msg = document.getElementById('save-msg');
-  msg.textContent = 'Saved!';
+  if (d.ok) {
+    msg.textContent = 'Saved!';
+    msg.style.color = 'var(--green)';
+  } else {
+    msg.textContent = 'Save failed';
+    msg.style.color = 'var(--red)';
+  }
   msg.style.opacity = '1';
-  setTimeout(() => msg.style.opacity = '0', 2000);
+  setTimeout(() => msg.style.opacity = '0', 2500);
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

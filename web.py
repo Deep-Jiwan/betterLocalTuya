@@ -143,7 +143,7 @@ async def handle_env_post(request):
     body = await request.json()
     ENV_FILE.touch(exist_ok=True)
     for k, v in body.items():
-        if v and "•" not in v:  # skip redacted placeholders
+        if isinstance(v, str) and "•" not in v:  # skip redacted placeholders
             set_key(str(ENV_FILE), k, v)
     return web.json_response({"ok": True})
 
