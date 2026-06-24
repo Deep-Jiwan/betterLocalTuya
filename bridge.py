@@ -55,6 +55,21 @@ def _make_socket_pair() -> tuple[socket.socket, socket.socket]:
         return r, w
 
 
+def _apply_keepalive(sock: socket.socket, idle: int = 60, interval: int = 10, count: int = 3):
+    """Enable TCP keepalive to prevent router conntrack from silently dropping idle connections."""
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # These constants exist on Linux and Windows 10+; skip gracefully if absent.
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, idle)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, interval)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, count)
+    except Exception:
+        pass  # keepalive is best-effort; don't break the connection if it fails
+
+
 # ── MQTT topic helpers ────────────────────────────────────────────────────────
 
 def state_topic(dev_id: str)         -> str: return f"tuya/state/{dev_id}"
@@ -123,6 +138,7 @@ class DeviceWorker(threading.Thread):
                 status = d.status()
                 if status and "dps" in status:
                     self.dev["version"] = v
+                    _apply_keepalive(d.socket)
                     return d
                 # bad response — close before trying next version
                 d.close()
