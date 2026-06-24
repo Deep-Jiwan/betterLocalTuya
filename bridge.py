@@ -16,7 +16,6 @@ import asyncio
 import json
 import logging
 import os
-import queue
 import selectors
 import socket
 import sys
@@ -36,6 +35,7 @@ REGISTRY_FILE   = Path("devices_registry.json")
 HA_DISCOVERY    = "homeassistant"
 HEARTBEAT_SECS  = 15
 RECONNECT_SECS  = 10
+MIN_CMD_INTERVAL = 0.15   # minimum seconds between sends to the same device
 VERSIONS        = [3.3, 3.4, 3.5, 3.1]
 
 
@@ -91,7 +91,9 @@ class DeviceWorker(threading.Thread):
         self.dev         = dev
         self.state_queue = state_queue
         self.loop        = loop
-        self.cmd_queue   = queue.Queue()
+        self._pending: dict[str, object] = {}   # dps_code → latest value (coalesced)
+        self._lock       = threading.Lock()
+        self._last_send  = 0.0
         self._stop_evt   = threading.Event()
         self._wake_r, self._wake_w = _make_socket_pair()
 
@@ -103,8 +105,9 @@ class DeviceWorker(threading.Thread):
             pass
 
     def send_command(self, dps_code: str, value):
-        """Called from asyncio thread — puts command in queue and wakes select()."""
-        self.cmd_queue.put((dps_code, value))
+        """Called from asyncio thread. Coalesces: only the latest value per DPS is kept."""
+        with self._lock:
+            self._pending[dps_code] = value
         try:
             self._wake_w.send(b"\x01")  # any byte wakes select()
         except Exception:
@@ -182,12 +185,24 @@ class DeviceWorker(threading.Thread):
                     last_hb = time.monotonic()
 
                     while not self._stop_evt.is_set():
-                        # sleep until next heartbeat deadline or an event fires
-                        timeout = max(0.1, HEARTBEAT_SECS - (time.monotonic() - last_hb))
+                        now = time.monotonic()
+                        hb_in   = max(0.0, HEARTBEAT_SECS - (now - last_hb))
+                        cool_in = max(0.0, MIN_CMD_INTERVAL - (now - self._last_send))
+                        with self._lock:
+                            has_pending = bool(self._pending)
+                        # wake early if pending commands are waiting out a cooldown
+                        timeout = max(0.05, min(hb_in, cool_in if has_pending else hb_in))
                         ready = sel.select(timeout=timeout)
 
                         for key, _ in ready:
-                            if key.data == "device":
+                            if key.data == "wake":
+                                # drain fully so bytes don't accumulate
+                                try:
+                                    self._wake_r.recv(4096)
+                                except Exception:
+                                    pass
+
+                            elif key.data == "device":
                                 # ── inbound: device sent something ───────
                                 data = d.receive()
                                 if data is None:
@@ -198,18 +213,19 @@ class DeviceWorker(threading.Thread):
                                 elif data.get("Err"):
                                     raise ConnectionError(f"device error: {data}")
 
-                            elif key.data == "wake":
-                                # ── outbound: command waiting in queue ───
-                                try:
-                                    self._wake_r.recv(64)  # drain wakeup bytes
-                                except Exception:
-                                    pass
-                                if self._stop_evt.is_set():
-                                    break
-                                while not self.cmd_queue.empty():
-                                    dps_code, value = self.cmd_queue.get_nowait()
-                                    d.set_value(dps_code, value, nowait=True)
-                                    log.info("[%s] Sent DPS%s = %s", name, dps_code, value)
+                        if self._stop_evt.is_set():
+                            break
+
+                        # ── flush pending commands (with pacing) ──────────
+                        with self._lock:
+                            snap, self._pending = self._pending, {}
+                        for dps_code, value in snap.items():
+                            wait = MIN_CMD_INTERVAL - (time.monotonic() - self._last_send)
+                            if wait > 0:
+                                time.sleep(wait)
+                            d.set_value(dps_code, value, nowait=True)
+                            self._last_send = time.monotonic()
+                            log.info("[%s] Sent DPS%s = %s", name, dps_code, value)
 
                         # ── heartbeat ─────────────────────────────────────
                         if time.monotonic() - last_hb >= HEARTBEAT_SECS:
