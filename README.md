@@ -1,25 +1,24 @@
 # betterLocalTuya
 
-> Local-first Tuya → MQTT → Home Assistant bridge with sub-100ms latency, zero cloud dependency at runtime, and a built-in web UI.
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Deep-Jiwan/betterLocalTuya&type=Date)](https://star-history.com/#Deep-Jiwan/betterLocalTuya&Date)
+> Local-first Tuya → MQTT → Home Assistant bridge with sub-100ms command latency, zero cloud dependency at runtime, and a built-in web UI.
 
 ---
 
-## Why not just LocalTuya?
+## What makes this different
 
-[LocalTuya](https://github.com/rospogrigio/localtuya) is a HA custom component — it lives inside Home Assistant, one integration instance per device, each polling independently. This project takes a different approach:
+**Sub-100ms command latency** via `select()` + socketpair wakeup. The device thread blocks on `select()` watching the Tuya socket and a local pipe. Sending a command writes one byte to the pipe, unblocking `select()` within microseconds — no polling interval.
 
-| | LocalTuya | betterLocalTuya |
-|---|---|---|
-| Connection model | One HA entity = one TCP socket | Persistent per-device socket, shared MQTT bus |
-| Command latency | 300ms–2s (poll cycle + reconnect) | <100ms (select+socketpair wakeup) |
-| Idle reconnect | Silent stale socket → slow first command | TCP keepalive probes prevent router conntrack timeout |
-| Multi-switch state | Can corrupt (partial DPS overwrite) | Merge cache: partial DPS updates are accumulated before publish |
-| Burst commands | Each sent immediately, firmware overwhelmed | Coalescing map collapses burst to one send per DPS key |
-| Device discovery | Manual IP + key entry per device | Auto-discovery via Tuya Cloud API, one-click re-scan |
-| Deployment | HA restart required for config changes | Standalone Docker container, HA just needs MQTT |
-| Observability | HA logs only | Built-in web UI with live log stream, per-device stats, control panel |
+**Persistent connections with automatic recovery.** One long-lived TCP socket per device. TCP keepalive probes (60s idle, 10s interval, 3 probes) keep router NAT entries alive and detect dead connections before a command needs to be sent. Exponential backoff on reconnect so offline devices don't hammer the network.
+
+**Correct multi-switch state.** Tuya devices return partial DPS maps (e.g. only `{"2": true}` when you toggle switch 2). A merge cache accumulates all known DPS values before each publish, preventing other switches from appearing to turn off in Home Assistant.
+
+**Flood control.** A coalescing command map (`dict[dps → value]`) under a lock absorbs rapid-fire commands — a burst of 1000 identical commands collapses to a single send. 150ms pacing protects device firmware.
+
+**Auto-discovery.** One scan via the Tuya Cloud API fetches all device IPs and local encryption keys. After that, no cloud calls happen at runtime — everything is local.
+
+**Zero external dependencies.** An embedded MQTT broker (amqtt) runs in-process. No Mosquitto, no external broker service needed.
+
+**Built-in web UI.** Monitor device state, send commands, re-run discovery, and edit settings — all without touching config files or restarting the container.
 
 ---
 
@@ -27,29 +26,21 @@
 
 ```
 Tuya Device (LAN, port 6668)
-        │  persistent TCP  │  select() loop
-        ▼                  │
-   DeviceWorker ──────────►│  socketpair wakeup
-        │                  │  coalescing command map
-        │  DPS state       │  TCP keepalive (60s idle probe)
-        ▼                  │
-   State Cache (merge)     │  exponential backoff on failure
+        │  persistent TCP
+        ▼
+   DeviceWorker
+   ├─ select() loop + socketpair wakeup
+   ├─ coalescing command map
+   ├─ TCP keepalive
+   └─ exponential backoff
+        │
+        ▼ DPS state (merge cache)
+        │
+   MQTT Broker (amqtt, embedded :47883)
         │
         ▼
-   MQTT Broker (amqtt, embedded, port 47883)
-        │
-        ▼
-   Home Assistant  ←──────  HA MQTT Discovery (auto-registered entities)
+   Home Assistant  ←── HA MQTT Discovery (auto-registered entities)
 ```
-
-**Key design decisions:**
-
-- **`select()` + socketpair wakeup** — the device thread blocks on `select()` watching the Tuya socket and a local pipe. `send_command()` writes one byte to the pipe, unblocking `select()` within microseconds. No polling interval.
-- **Coalescing command map** — `dict[dps → value]` under a lock. A flood of 1000 identical commands collapses to a single send. 150ms pacing prevents firmware overload.
-- **State merge cache** — Tuya devices return partial DPS maps (e.g. only `{"2": true}`). Without merging, publishing this as the full state clobbers other switches in HA. The cache accumulates all known DPS before each publish.
-- **TCP keepalive** — `SO_KEEPALIVE` with 60s idle, 10s interval, 3 probes. Keeps router NAT/conntrack entries alive and detects dead connections proactively, avoiding the 2–3s OS timeout on first command after idle.
-- **Embedded MQTT broker** — no external Mosquitto needed. amqtt runs in-process; the bridge connects to itself.
-- **HA MQTT Discovery** — entities register themselves on startup via `homeassistant/<type>/<uid>/config` retained topics. Zero HA configuration required beyond pointing it at the broker.
 
 ---
 
@@ -60,13 +51,15 @@ Tuya Device (LAN, port 6668)
 - Tuya developer account ([iot.tuya.com](https://iot.tuya.com)) — for the one-time device discovery only
 - Home Assistant with MQTT integration
 
-### 1. Clone and configure
+### 1. Clone
 
 ```bash
 git clone https://github.com/Deep-Jiwan/betterLocalTuya.git
 cd betterLocalTuya
 mkdir -p data
 ```
+
+### 2. Configure
 
 Edit `docker-compose.yml` and fill in your Tuya credentials:
 
@@ -77,31 +70,58 @@ environment:
   TUYA_REGION:    eu          # eu | us | us-e | cn | in
 ```
 
-### 2. Run discovery
+Or pull the published image directly — no build needed:
 
-Open the web UI at `http://localhost:47090`, go to the **Discovery** tab, and click **Run Discovery**. This calls the Tuya Cloud API once to fetch device IPs and local keys, then saves them locally. No cloud calls happen after this.
+```yaml
+services:
+  betterlocaltuya:
+    image: ghcr.io/deep-jiwan/betterlocaltuya:latest
+    container_name: betterlocaltuya
+    restart: unless-stopped
+    ports:
+      - "47883:47883"   # MQTT broker
+      - "47090:47090"   # Web UI
+      - "47765:47765"   # Health
+    environment:
+      TUYA_CLIENT_ID: your_client_id
+      TUYA_SECRET:    your_secret
+      TUYA_REGION:    eu
+      MQTT_HOST:      localhost
+      MQTT_PORT:      "47883"
+      MQTT_USERNAME:  ""
+      MQTT_PASSWORD:  ""
+      WEB_PORT:       "47090"
+      HEALTH_PORT:    "47765"
+    volumes:
+      - ./data/devices_registry.json:/app/devices_registry.json
+      - ./data/.env:/app/.env
+      - ./data/logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:47765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+```
 
-### 3. Start the bridge
+### 3. Run discovery
 
 ```bash
 docker compose up -d
 ```
 
-Check it's healthy:
-```bash
-docker exec tuyamqtt curl -sf http://localhost:47765/health
-```
+Open `http://localhost:47090`, go to the **Discovery** tab, and click **Run Discovery**. This calls the Tuya Cloud API once to fetch device IPs and local keys, saves them to `data/devices_registry.json`, then runs entirely locally from that point on.
 
 ### 4. Connect Home Assistant
 
-In HA → Settings → Integrations → MQTT:
-- **Broker**: your host machine's LAN IP (e.g. `192.168.1.100`)
+Settings → Integrations → MQTT:
+- **Broker**: your host machine's LAN IP (e.g. `192.168.1.100`) — not `localhost`
 - **Port**: `47883`
-- Username/Password: leave blank unless configured
+- Username / Password: leave blank unless you configured them
 
-Devices appear automatically under HA's MQTT integration — no entity configuration needed.
+Entities appear automatically under the MQTT integration — no manual entity configuration.
 
-> **Windows/Docker Desktop note:** add a Windows Firewall inbound rule for TCP port 47883 so HA can reach the broker:
+> **Windows / Docker Desktop:** add a firewall rule so HA can reach the broker:
 > ```powershell
 > # Run as Administrator
 > New-NetFirewallRule -DisplayName "betterLocalTuya MQTT" -Direction Inbound -Protocol TCP -LocalPort 47883 -Action Allow -Profile Any
@@ -115,10 +135,10 @@ Devices appear automatically under HA's MQTT integration — no entity configura
 
 | Tab | What's there |
 |---|---|
-| Monitoring | Live device status, online/offline indicators, uptime, log stream |
+| Monitoring | Live device status, online/offline indicators, uptime, scrolling log stream |
 | Control | Per-device DPS toggles and values, instant send |
 | Discovery | Re-run device scan, stream output live |
-| Settings | Edit `.env` (credentials, region, MQTT config) without restarting |
+| Settings | Edit credentials and MQTT config without restarting |
 
 ---
 
@@ -128,7 +148,7 @@ Devices appear automatically under HA's MQTT integration — no entity configura
 |---|---|---|
 | `TUYA_CLIENT_ID` | — | Tuya Cloud app client ID |
 | `TUYA_SECRET` | — | Tuya Cloud app secret |
-| `TUYA_REGION` | `eu` | Cloud API region |
+| `TUYA_REGION` | `eu` | Cloud API region (`eu` / `us` / `us-e` / `cn` / `in`) |
 | `MQTT_HOST` | `localhost` | MQTT broker host |
 | `MQTT_PORT` | `47883` | MQTT broker port |
 | `MQTT_USERNAME` | `` | Optional broker auth |
@@ -140,21 +160,14 @@ Devices appear automatically under HA's MQTT integration — no entity configura
 
 ## Persistent data
 
-The `./data/` directory is mounted into the container:
+Mount `./data/` into the container to survive restarts:
 
 ```
 data/
-  devices_registry.json   # local keys + IPs from discovery (never commit this)
-  .env                    # credential overrides (never commit this)
-  logs/                   # rotating logs, 5 MB × 5 files
+  devices_registry.json   # local keys + IPs from discovery (keep private, do not commit)
+  .env                    # credential overrides (keep private, do not commit)
+  logs/                   # rotating logs — 5 MB × 5 files
 ```
-
----
-
-## Built on
-
-- **[tinytuya](https://github.com/jasonacox/tinytuya)** — pure-Python Tuya LAN protocol implementation. Handles protocol versions 3.1 / 3.3 / 3.4 / 3.5, encryption, heartbeat, and the raw socket interface this bridge drives directly.
-- **[amqtt](https://github.com/Yakifo/amqtt)** — pure-Python async MQTT broker. Runs embedded in the same process; no external broker binary or service required.
 
 ---
 
@@ -175,4 +188,17 @@ GET http://localhost:47765/health
 }
 ```
 
-Used by Docker's built-in healthcheck (`docker ps` shows `(healthy)`).
+Used by Docker's built-in healthcheck — `docker ps` shows `(healthy)` once all services are up.
+
+---
+
+## Built on
+
+- **[tinytuya](https://github.com/jasonacox/tinytuya)** — pure-Python Tuya LAN protocol implementation. Handles protocol versions 3.1 / 3.3 / 3.4 / 3.5, encryption, heartbeat, and the raw socket interface this bridge drives directly.
+- **[amqtt](https://github.com/Yakifo/amqtt)** — pure-Python async MQTT broker. Runs embedded in the same process; no external broker binary or service needed.
+
+---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Deep-Jiwan/betterLocalTuya&type=Date)](https://star-history.com/#Deep-Jiwan/betterLocalTuya&Date)
