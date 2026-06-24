@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import queue
+import selectors
+import socket
 import sys
 import threading
 import time
@@ -32,9 +34,25 @@ log = logging.getLogger("bridge")
 
 REGISTRY_FILE   = Path("devices_registry.json")
 HA_DISCOVERY    = "homeassistant"
-HEARTBEAT_SECS  = 20
+HEARTBEAT_SECS  = 15
 RECONNECT_SECS  = 10
 VERSIONS        = [3.3, 3.4, 3.5, 3.1]
+
+
+def _make_socket_pair() -> tuple[socket.socket, socket.socket]:
+    """Cross-platform socket pair used as wakeup channel."""
+    try:
+        return socket.socketpair()
+    except AttributeError:
+        # Windows < 3.12: build a loopback TCP pair manually
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        w = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        w.connect(("127.0.0.1", srv.getsockname()[1]))
+        r, _ = srv.accept()
+        srv.close()
+        return r, w
 
 
 # ── MQTT topic helpers ────────────────────────────────────────────────────────
@@ -48,9 +66,9 @@ def cmd_topic(dev_id: str, dps: str) -> str: return f"tuya/command/{dev_id}/{dps
 
 class DeviceWorker(threading.Thread):
     """
-    Maintains a persistent tinytuya connection for one device.
-    Pushes state dicts into `state_queue` for the asyncio loop to publish.
-    Accepts command dicts from `cmd_queue` to send to the device.
+    One thread per device. Uses select() on the device socket and a wakeup
+    socketpair so commands are delivered the instant they arrive — no polling,
+    no timeout expiry. Single TCP connection throughout.
     """
 
     def __init__(self, dev: dict, state_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
@@ -58,14 +76,29 @@ class DeviceWorker(threading.Thread):
         self.dev         = dev
         self.state_queue = state_queue
         self.loop        = loop
-        self.cmd_queue: queue.Queue = queue.Queue()
+        self.cmd_queue   = queue.Queue()
         self._stop_evt   = threading.Event()
+        self._wake_r, self._wake_w = _make_socket_pair()
 
     def stop(self):
         self._stop_evt.set()
+        try:
+            self._wake_w.send(b"\x00")
+        except Exception:
+            pass
 
     def send_command(self, dps_code: str, value):
+        """Called from asyncio thread — puts command in queue and wakes select()."""
         self.cmd_queue.put((dps_code, value))
+        try:
+            self._wake_w.send(b"\x01")  # any byte wakes select()
+        except Exception:
+            pass
+
+    def _push_state(self, dps: dict, available: bool = True):
+        async def _put():
+            await self.state_queue.put({"id": self.dev["id"], "dps": dps, "available": available})
+        asyncio.run_coroutine_threadsafe(_put(), self.loop)
 
     def _connect(self) -> tinytuya.Device | None:
         ip  = self.dev.get("ip", "")
@@ -76,6 +109,7 @@ class DeviceWorker(threading.Thread):
 
         versions = [ver] + [v for v in VERSIONS if v != ver]
         for v in versions:
+            d = None
             try:
                 d = tinytuya.Device(
                     dev_id=self.dev["id"],
@@ -84,87 +118,108 @@ class DeviceWorker(threading.Thread):
                     version=v,
                     persist=True,
                 )
-                d.set_socketTimeout(HEARTBEAT_SECS + 5)
+                d.set_socketPersistent(True)
+                d.set_socketTimeout(5)
                 status = d.status()
                 if status and "dps" in status:
-                    self.dev["version"] = v  # remember working version
+                    self.dev["version"] = v
                     return d
+                # bad response — close before trying next version
+                d.close()
             except Exception:
-                pass
+                if d is not None:
+                    try:
+                        d.close()
+                    except Exception:
+                        pass
         return None
-
-    def _push_state(self, dps: dict, available: bool = True):
-        async def _pub():
-            await self.state_queue.put({
-                "id":        self.dev["id"],
-                "dps":       dps,
-                "available": available,
-            })
-        asyncio.run_coroutine_threadsafe(_pub(), self.loop)
 
     def run(self):
         name = self.dev["name"]
-        while not self._stop_evt.is_set():
-            log.info("[%s] Connecting...", name)
-            d = self._connect()
 
-            if d is None:
-                log.warning("[%s] Unreachable — retry in %ss", name, RECONNECT_SECS)
-                self._push_state({}, available=False)
-                self._stop_evt.wait(RECONNECT_SECS)
-                continue
-
-            log.info("[%s] Connected (v%s)", name, self.dev.get("version"))
-
-            # push initial status
-            try:
-                status = d.status()
-                if status and "dps" in status:
-                    self._push_state(status["dps"], available=True)
-            except Exception:
-                pass
-
-            last_heartbeat = time.time()
-
+        try:
             while not self._stop_evt.is_set():
-                # ── send any pending commands ────────────────────────────
-                while not self.cmd_queue.empty():
-                    try:
-                        dps_code, value = self.cmd_queue.get_nowait()
-                        d.set_value(dps_code, value)
-                        log.debug("[%s] Sent DPS%s = %s", name, dps_code, value)
-                    except Exception as e:
-                        log.warning("[%s] Command failed: %s", name, e)
+                log.info("[%s] Connecting...", name)
+                d = self._connect()
 
-                # ── heartbeat ────────────────────────────────────────────
-                if time.time() - last_heartbeat >= HEARTBEAT_SECS:
-                    try:
-                        d.heartbeat(nowait=True)
-                        last_heartbeat = time.time()
-                    except Exception:
-                        break
+                if d is None:
+                    log.warning("[%s] Unreachable - retry in %ss", name, RECONNECT_SECS)
+                    self._push_state({}, available=False)
+                    self._stop_evt.wait(RECONNECT_SECS)
+                    continue
 
-                # ── receive update ───────────────────────────────────────
+                log.info("[%s] Connected (v%s)", name, self.dev.get("version"))
+
+                # push initial state
                 try:
-                    data = d.receive()
-                    if data is None:
-                        continue
-                    if "dps" in data:
-                        self._push_state(data["dps"], available=True)
-                    elif data.get("Err"):
-                        log.warning("[%s] Device error: %s", name, data.get("Error", data))
-                        break
-                except Exception as e:
-                    log.warning("[%s] Receive error: %s", name, e)
-                    break
+                    s = d.status()
+                    if s and "dps" in s:
+                        self._push_state(s["dps"], available=True)
+                except Exception:
+                    pass
 
-            log.warning("[%s] Disconnected — reconnecting in %ss", name, RECONNECT_SECS)
-            self._push_state({}, available=False)
+                # ── select loop ───────────────────────────────────────────
+                sel = selectors.DefaultSelector()
+                try:
+                    sel.register(d.socket, selectors.EVENT_READ, "device")
+                    sel.register(self._wake_r, selectors.EVENT_READ, "wake")
+                    last_hb = time.monotonic()
+
+                    while not self._stop_evt.is_set():
+                        # sleep until next heartbeat deadline or an event fires
+                        timeout = max(0.1, HEARTBEAT_SECS - (time.monotonic() - last_hb))
+                        ready = sel.select(timeout=timeout)
+
+                        for key, _ in ready:
+                            if key.data == "device":
+                                # ── inbound: device sent something ───────
+                                data = d.receive()
+                                if data is None:
+                                    continue
+                                if "dps" in data:
+                                    self._push_state(data["dps"], available=True)
+                                    log.debug("[%s] State: %s", name, data["dps"])
+                                elif data.get("Err"):
+                                    raise ConnectionError(f"device error: {data}")
+
+                            elif key.data == "wake":
+                                # ── outbound: command waiting in queue ───
+                                try:
+                                    self._wake_r.recv(64)  # drain wakeup bytes
+                                except Exception:
+                                    pass
+                                if self._stop_evt.is_set():
+                                    break
+                                while not self.cmd_queue.empty():
+                                    dps_code, value = self.cmd_queue.get_nowait()
+                                    d.set_value(dps_code, value, nowait=True)
+                                    log.info("[%s] Sent DPS%s = %s", name, dps_code, value)
+
+                        # ── heartbeat ─────────────────────────────────────
+                        if time.monotonic() - last_hb >= HEARTBEAT_SECS:
+                            d.heartbeat(nowait=True)
+                            last_hb = time.monotonic()
+                            log.debug("[%s] Heartbeat", name)
+
+                except Exception as e:
+                    log.warning("[%s] Connection lost: %s - reconnecting in %ss",
+                                name, e, RECONNECT_SECS)
+                finally:
+                    sel.close()
+
+                self._push_state({}, available=False)
+                try:
+                    d.close()
+                except Exception:
+                    pass
+                self._stop_evt.wait(RECONNECT_SECS)
+
+        finally:
             try:
-                d.close()
+                self._wake_r.close()
+                self._wake_w.close()
             except Exception:
                 pass
-            self._stop_evt.wait(RECONNECT_SECS)
 
 
 # ── HA entity builders ────────────────────────────────────────────────────────
@@ -439,6 +494,9 @@ async def main():
             await client.subscribe(topic)
         log.info("Ready — %d entity(ies), %d command topic(s)", len(all_entities), len(cmd_map))
 
+        # per-device merged state cache so partial DPS updates don't clobber other keys
+        state_cache: dict[str, dict] = {}
+
         async def publish_states():
             """Read device state updates and publish to MQTT."""
             while True:
@@ -451,8 +509,11 @@ async def main():
                 await client.publish(avail_topic(dev_id), status, retain=True)
 
                 if dps:
-                    await client.publish(state_topic(dev_id), json.dumps(dps), retain=True)
-                    log.debug("State %s: %s", dev_id, dps)
+                    # merge partial update into cached full state
+                    cached = state_cache.setdefault(dev_id, {})
+                    cached.update(dps)
+                    await client.publish(state_topic(dev_id), json.dumps(cached), retain=True)
+                    log.debug("State %s: %s", dev_id, cached)
 
         async def handle_commands():
             """Receive HA commands and forward to device workers."""
