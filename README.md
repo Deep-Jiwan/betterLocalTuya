@@ -78,10 +78,7 @@ services:
     image: ghcr.io/deep-jiwan/betterlocaltuya:latest
     container_name: betterlocaltuya
     restart: unless-stopped
-    ports:
-      - "47883:47883"   # MQTT broker
-      - "47090:47090"   # Web UI
-      - "47765:47765"   # Health
+    network_mode: host   # required for UDP discovery and direct device TCP
     environment:
       TUYA_CLIENT_ID: your_client_id
       TUYA_SECRET:    your_secret
@@ -93,9 +90,7 @@ services:
       WEB_PORT:       "47090"
       HEALTH_PORT:    "47765"
     volumes:
-      - ./data/devices_registry.json:/app/devices_registry.json
-      - ./data/.env:/app/.env
-      - ./data/logs:/app/logs
+      - ./data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:47765/health"]
       interval: 30s
@@ -103,6 +98,8 @@ services:
       retries: 5
       start_period: 40s
 ```
+
+> **Windows / Docker Desktop:** host networking doesn't expose ports to Windows localhost. Replace `network_mode: host` with explicit port mappings (`47883`, `47090`, `47765`). Device discovery (UDP broadcast) won't work in that mode — run discovery on a Linux machine first, then copy `data/devices_registry.json` across.
 
 ### 3. Run discovery
 

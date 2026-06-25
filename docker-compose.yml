@@ -4,10 +4,10 @@ services:
     image: tuyamqtt:latest
     container_name: tuyamqtt
     restart: unless-stopped
-    ports:
-      - "47883:47883"   # MQTT broker
-      - "47090:47090"   # Web UI
-      - "47765:47765"   # Health
+    # Host networking: required for Tuya LAN discovery (UDP broadcast) and
+    # direct device TCP connections. On Linux this exposes all ports on the
+    # host directly. On Windows/Docker Desktop use bridge mode instead (see README).
+    network_mode: host
     environment:
       # ── Tuya Cloud ────────────────────────────────────────────────
       TUYA_CLIENT_ID: your_client_id_here
