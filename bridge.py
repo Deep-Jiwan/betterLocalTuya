@@ -345,14 +345,20 @@ def entities_for_device(dev: dict) -> list[dict]:
                 },
             })
 
+        # DPS 18=current(mA), 19=power(0.1W), 20=voltage(0.1V)
         energy = {
-            "18": ("Current", "mA",  "current", "measurement"),
-            "19": ("Power",   "W",   "power",   "measurement"),
-            "20": ("Voltage", "V",   "voltage", "measurement"),
+            "18": ("Current", "mA",  "current", "measurement", 1),
+            "19": ("Power",   "W",   "power",   "measurement", 10),
+            "20": ("Voltage", "V",   "voltage", "measurement", 10),
         }
-        for dps_code, (label, unit, dev_class, state_class) in energy.items():
+        for dps_code, (label, unit, dev_class, state_class, scale) in energy.items():
             if dps_code in dps_map and dps_code.isdigit():
                 uid = f"{dev_id}_e{dps_code}"
+                val_tpl = (
+                    f"{{{{ (value_json.get('{dps_code}', 0) | float / {scale}) | round(1) }}}}"
+                    if scale > 1 else
+                    f"{{{{ value_json.get('{dps_code}', 0) }}}}"
+                )
                 entities.append({
                     "ha_type":         "sensor",
                     "unique_id":       uid,
@@ -362,7 +368,7 @@ def entities_for_device(dev: dict) -> list[dict]:
                         "name":                f"{name} {label}",
                         "unique_id":           uid,
                         "state_topic":         state_topic(dev_id),
-                        "value_template":      f"{{{{ value_json.get('{dps_code}', 0) }}}}",
+                        "value_template":      val_tpl,
                         "unit_of_measurement": unit,
                         "device_class":        dev_class,
                         "state_class":         state_class,
@@ -404,6 +410,54 @@ def entities_for_device(dev: dict) -> list[dict]:
                 "dps_code":        "1",
                 "discovery_topic": f"{HA_DISCOVERY}/fan/{uid}/config",
                 "config":          config,
+            })
+
+        # Fan+light combo: DPS 9 = light on/off
+        if "9" in dps_map and dps_map["9"].get("type") == "bool":
+            light_uid = f"{dev_id}_light"
+            entities.append({
+                "ha_type":         "light",
+                "unique_id":       light_uid,
+                "dps_code":        "9",
+                "discovery_topic": f"{HA_DISCOVERY}/light/{light_uid}/config",
+                "config": {
+                    "name":               f"{name} Light",
+                    "unique_id":          light_uid,
+                    "state_topic":        state_topic(dev_id),
+                    "state_value_template": "{% set v = value_json.get('9') %}"
+                                            "{{ 'ON' if v else 'OFF' }}",
+                    "command_topic":      cmd_topic(dev_id, "9"),
+                    "payload_on":         "ON",
+                    "payload_off":        "OFF",
+                    "availability_topic": avail_topic(dev_id),
+                    "device":             ha_dev,
+                },
+            })
+
+        # Gang switches on high DPS (e.g. 101, 102, 103, 104 on fan+switch combos)
+        gang_dps = sorted(
+            [c for c, info in dps_map.items()
+             if c.isdigit() and int(c) >= 100 and info.get("type") == "bool"],
+            key=int,
+        )
+        for i, dps_code in enumerate(gang_dps, start=1):
+            uid = f"{dev_id}_sw{dps_code}"
+            entities.append({
+                "ha_type":         "switch",
+                "unique_id":       uid,
+                "dps_code":        dps_code,
+                "discovery_topic": f"{HA_DISCOVERY}/switch/{uid}/config",
+                "config": {
+                    "name":               f"{name} Switch {i}",
+                    "unique_id":          uid,
+                    "state_topic":        state_topic(dev_id),
+                    "value_template":     f"{{{{ 'ON' if value_json.get('{dps_code}') else 'OFF' }}}}",
+                    "command_topic":      cmd_topic(dev_id, dps_code),
+                    "payload_on":         "ON",
+                    "payload_off":        "OFF",
+                    "availability_topic": avail_topic(dev_id),
+                    "device":             ha_dev,
+                },
             })
 
     elif dev_type == "light":

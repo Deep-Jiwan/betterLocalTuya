@@ -74,6 +74,32 @@ def fetch_cloud_devices() -> list[dict]:
         print("No devices returned. Check credentials and region.")
         sys.exit(1)
 
+    # Some devices only appear when queried via a known device ID (different home/sub-account).
+    # Load existing registry IDs and try fetching the full home list via each one.
+    seen_ids = {d.get("id") for d in devices}
+    extra_ids_to_try = set()
+    if REGISTRY_FILE.exists():
+        try:
+            existing = json.loads(REGISTRY_FILE.read_text()).get("devices", [])
+            extra_ids_to_try = {d["id"] for d in existing if d["id"] not in seen_ids}
+        except Exception:
+            pass
+
+    for probe_id in extra_ids_to_try:
+        try:
+            cloud2 = tinytuya.Cloud(
+                apiRegion=region, apiKey=api_key, apiSecret=api_secret,
+                apiDeviceID=probe_id,
+            )
+            extra = cloud2.getdevices()
+            if isinstance(extra, list):
+                for d in extra:
+                    if d.get("id") not in seen_ids:
+                        devices.append(d)
+                        seen_ids.add(d["id"])
+        except Exception:
+            pass
+
     print(f"      {len(devices)} device(s) found in cloud")
     return devices
 
