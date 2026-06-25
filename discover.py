@@ -194,14 +194,16 @@ def save_registry(devices: dict):
 def run(force: bool = False):
     cloud_devices = fetch_cloud_devices()
     ip_map        = scan_lan()
+    existing      = load_registry()
 
     # attach IPs and normalise version key
+    # priority: UDP scan > existing registry > cloud (cloud rarely has IPs)
     for dev in cloud_devices:
         dev_id = dev.get("id", "")
-        dev["ip"]  = ip_map.get(dev_id, dev.get("ip", ""))
+        prev_ip = existing.get(dev_id, {}).get("ip", "")
+        dev["ip"]  = ip_map.get(dev_id) or prev_ip or dev.get("ip", "")
         dev["ver"] = str(dev.pop("version", dev.get("ver", "3.3")))
 
-    existing = load_registry()
     updated  = {}
 
     total = len(cloud_devices)
