@@ -15,3 +15,14 @@ wheels/
 # Tuya generated files
 devices.json
 devices_registry.json
+
+# Dashboard push scripts (local tooling, not part of bridge repo)
+push_godtier.py
+push_godtier_backup.py
+push_mushroom.py
+push_dashboard.py
+tuya2mqtt.conf
+
+# Runtime dirs
+data/
+logs/

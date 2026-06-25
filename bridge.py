@@ -324,15 +324,15 @@ def entities_for_device(dev: dict) -> list[dict]:
             key=int,
         )
         for i, dps_code in enumerate(bool_dps):
-            suffix = f" {i + 1}" if len(bool_dps) > 1 else ""
             uid = f"{dev_id}_sw{dps_code}"
+            entity_name = str(i + 1) if len(bool_dps) > 1 else None
             entities.append({
                 "ha_type":         "switch",
                 "unique_id":       uid,
                 "dps_code":        dps_code,
                 "discovery_topic": f"{HA_DISCOVERY}/switch/{uid}/config",
                 "config": {
-                    "name":               f"{name}{suffix}",
+                    "name":               entity_name,
                     "unique_id":          uid,
                     "state_topic":        state_topic(dev_id),
                     "value_template":     f"{{% set v = value_json.get('{dps_code}') %}}"
@@ -365,7 +365,7 @@ def entities_for_device(dev: dict) -> list[dict]:
                     "dps_code":        dps_code,
                     "discovery_topic": f"{HA_DISCOVERY}/sensor/{uid}/config",
                     "config": {
-                        "name":                f"{name} {label}",
+                        "name":                label,
                         "unique_id":           uid,
                         "state_topic":         state_topic(dev_id),
                         "value_template":      val_tpl,
@@ -387,7 +387,7 @@ def entities_for_device(dev: dict) -> list[dict]:
                 None,
             )
             config = {
-                "name":               name,
+                "name":               None,
                 "unique_id":          uid,
                 "state_topic":        state_topic(dev_id),
                 "state_value_template": "{% set v = value_json.get('1') %}"
@@ -421,7 +421,7 @@ def entities_for_device(dev: dict) -> list[dict]:
                 "dps_code":        "9",
                 "discovery_topic": f"{HA_DISCOVERY}/light/{light_uid}/config",
                 "config": {
-                    "name":               f"{name} Light",
+                    "name":               "Light",
                     "unique_id":          light_uid,
                     "state_topic":        state_topic(dev_id),
                     "state_value_template": "{% set v = value_json.get('9') %}"
@@ -448,7 +448,7 @@ def entities_for_device(dev: dict) -> list[dict]:
                 "dps_code":        dps_code,
                 "discovery_topic": f"{HA_DISCOVERY}/switch/{uid}/config",
                 "config": {
-                    "name":               f"{name} Switch {i}",
+                    "name":               f"Switch {i}",
                     "unique_id":          uid,
                     "state_topic":        state_topic(dev_id),
                     "value_template":     f"{{{{ 'ON' if value_json.get('{dps_code}') else 'OFF' }}}}",
@@ -465,7 +465,7 @@ def entities_for_device(dev: dict) -> list[dict]:
         if onoff_dps:
             uid = f"{dev_id}_light"
             config = {
-                "name":               name,
+                "name":               None,
                 "unique_id":          uid,
                 "state_topic":        state_topic(dev_id),
                 "state_value_template": f"{{% set v = value_json.get('{onoff_dps}') %}}"
