@@ -46,6 +46,18 @@ Tuya Device (LAN, port 6668)
 
 ## Getting started
 
+### One-command install (Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Deep-Jiwan/betterLocalTuya/main/install.sh | bash
+```
+
+This handles everything: dependencies, uv, repo clone, credentials prompt, discovery, and a systemd service that starts on boot.
+
+---
+
+### Manual setup
+
 ### Prerequisites
 - Docker + Docker Compose
 - Tuya developer account ([iot.tuya.com](https://iot.tuya.com)) — for the one-time device discovery only
