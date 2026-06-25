@@ -13,9 +13,7 @@ Usage:
 
 import json
 import os
-import socket
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import tinytuya
@@ -81,87 +79,23 @@ def fetch_cloud_devices() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Step 2: LAN scan — TCP port probe on port 6668 across all local subnets
+# Step 2: LAN scan
 # ---------------------------------------------------------------------------
 
-TUYA_PORT = 6668
-
-
-def _tcp_open(ip: str, timeout: float = 0.6) -> bool:
+def scan_lan() -> dict[str, str]:
+    print("[2/3] Scanning LAN for device IPs...")
     try:
-        with socket.create_connection((ip, TUYA_PORT), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def _local_subnets() -> list[str]:
-    """
-    Return /24 subnet prefixes for every non-loopback interface.
-    Works on Linux (ip addr) and falls back to hostname resolution.
-    """
-    import re, subprocess
-    subnets: set[str] = set()
-
-    # Linux: parse `ip addr` — reliable, no extra deps
-    try:
-        out = subprocess.run(
-            ["ip", "addr"], capture_output=True, text=True, timeout=3
-        ).stdout
-        for m in re.finditer(r"inet (\d+\.\d+\.\d+)\.\d+/\d+", out):
-            subnets.add(m.group(1) + ".")
-    except Exception:
-        pass
-
-    # Fallback: hostname → primary IP → /24
-    if not subnets:
-        try:
-            ip = socket.gethostbyname(socket.gethostname())
-            subnets.add(".".join(ip.split(".")[:3]) + ".")
-        except Exception:
-            pass
-
-    return [s for s in subnets if not s.startswith("127.")]
-
-
-def scan_lan(existing: dict) -> set[str]:
-    """
-    Sweep every /24 subnet the host is attached to for Tuya port 6668.
-    Also sweeps subnets of IPs known from the existing registry (covers
-    cases where the device subnet is routed but not locally attached).
-    Returns a set of IPs with port 6668 open.
-    """
-    print("[2/3] Scanning LAN for Tuya devices on port 6668...")
-
-    subnets: set[str] = set(_local_subnets())
-
-    # also sweep subnets of registry IPs (handles routed/VLAN setups)
-    for dev in existing.values():
-        ip = dev.get("ip", "")
-        if ip:
-            subnets.add(".".join(ip.split(".")[:3]) + ".")
-
-    if not subnets:
-        print("      Could not determine any subnets to scan.")
-        return set()
-
-    candidates: set[str] = set()
-    for subnet in subnets:
-        for i in range(1, 255):
-            candidates.add(f"{subnet}{i}")
-
-    print(f"      Scanning {len(candidates)} IPs across {len(subnets)} subnet(s): "
-          + ", ".join(s.rstrip(".") + ".0/24" for s in sorted(subnets)))
-
-    live: set[str] = set()
-    with ThreadPoolExecutor(max_workers=200) as pool:
-        fut_map = {pool.submit(_tcp_open, ip): ip for ip in candidates}
-        for fut in as_completed(fut_map):
-            if fut.result():
-                live.add(fut_map[fut])
-
-    print(f"      {len(live)} device(s) found with port 6668 open: {sorted(live)}")
-    return live
+        scan_result = tinytuya.deviceScan(verbose=False, maxretry=5, color=False)
+        ip_map = {}
+        for ip, info in scan_result.items():
+            dev_id = info.get("gwId") or info.get("devId") or info.get("id")
+            if dev_id:
+                ip_map[dev_id] = ip
+        print(f"      {len(ip_map)} device(s) responded on LAN")
+        return ip_map
+    except Exception as e:
+        print(f"      LAN scan error ({e}) - IPs will be empty")
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -259,56 +193,27 @@ def save_registry(devices: dict):
 
 def run(force: bool = False):
     cloud_devices = fetch_cloud_devices()
+    ip_map        = scan_lan()
     existing      = load_registry()
-    live_ips      = scan_lan(existing)
 
-    # Build id→dev map and assign IPs
-    # Priority: live scan confirmed > registry (device may be offline) > unknown
-    dev_map: dict[str, dict] = {}
-    unmatched: list[dict] = []  # devices with no confirmed IP yet
-
+    # attach IPs and normalise version key
+    # priority: UDP scan > existing registry > cloud (cloud rarely has IPs)
     for dev in cloud_devices:
-        dev_id  = dev.get("id", "")
+        dev_id = dev.get("id", "")
         prev_ip = existing.get(dev_id, {}).get("ip", "")
+        dev["ip"]  = ip_map.get(dev_id) or prev_ip or dev.get("ip", "")
         dev["ver"] = str(dev.pop("version", dev.get("ver", "3.3")))
-
-        if prev_ip and prev_ip in live_ips:
-            dev["ip"] = prev_ip          # confirmed live
-            dev_map[dev_id] = dev
-        elif prev_ip:
-            dev["ip"] = prev_ip          # keep for probe even if not in scan
-            dev_map[dev_id] = dev
-        else:
-            dev["ip"] = ""
-            dev_map[dev_id] = dev
-            unmatched.append(dev)        # no IP at all — needs matching
-
-    # For unmatched devices try every live IP not already claimed
-    claimed = {d.get("ip") for d in dev_map.values() if d.get("ip")}
-    unclaimed_ips = sorted(live_ips - claimed)
-
-    if unmatched and unclaimed_ips:
-        print(f"[2b] Matching {len(unmatched)} new device(s) to {len(unclaimed_ips)} unclaimed IP(s)...")
-        for live_ip in unclaimed_ips:
-            for dev in list(unmatched):
-                dev["ip"] = live_ip
-                if probe_device(dev)["reachable"]:
-                    print(f"      Matched {dev.get('name')} → {live_ip}")
-                    unmatched.remove(dev)
-                    claimed.add(live_ip)
-                    break
-                dev["ip"] = ""
 
     updated  = {}
 
-    total = len(dev_map)
+    total = len(cloud_devices)
     print(f"[3/3] Probing {total} device(s) over LAN...\n")
     print(f"  {'Name':<28} {'Type':<8} {'IP':<16} {'DPS codes'}")
     print(f"  {'-'*80}")
 
     reachable = skipped = 0
 
-    for raw in dev_map.values():
+    for raw in cloud_devices:
         dev_id   = raw.get("id", "")
         name     = raw.get("name", dev_id)
         ip       = raw.get("ip", "")
